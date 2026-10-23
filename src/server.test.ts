@@ -108,6 +108,29 @@ describe('interpreter API', () => {
     expect((await invalidOutput.json()).detail).toContain('no cumple el schema')
   })
 
+  it('returns OpenRouter usage when the response is truncated by the token limit', async () => {
+    process.env.RUSTFS_ENDPOINT = 'http://rustfs.local:9000'
+    process.env.OPENROUTER_API_KEY = 'test-key'
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).startsWith('http://rustfs.local:9000/')) return new Response('document')
+      return Response.json({
+        usage: { prompt_tokens: 100, completion_tokens: 4096, total_tokens: 4196, cost: 0.0025 },
+        choices: [{ finish_reason: 'length', message: { content: '{"name":' } }],
+      })
+    }) as typeof fetch
+
+    const response = await handleRequest(post('/interpret', {
+      text_url: 'http://rustfs.local:9000/ocr-results/doc.txt?signature=private',
+      schema: { type: 'object' },
+    }))
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      detail: 'OpenRouter no devolvió una respuesta completa',
+      usage: { cost: 0.0025, prompt_tokens: 100, completion_tokens: 4096, total_tokens: 4196 },
+    })
+  })
+
   it('limits downloaded OCR text size', async () => {
     process.env.RUSTFS_ENDPOINT = 'http://rustfs.local:9000'
     process.env.OPENROUTER_API_KEY = 'test-key'

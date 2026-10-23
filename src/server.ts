@@ -41,7 +41,7 @@ function logStructured(level: 'info' | 'error', event: string, fields: Record<st
 }
 
 class ServiceError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly usage?: OpenRouterUsage) {
     super(message)
   }
 }
@@ -200,31 +200,34 @@ async function requestStructuredOutput(
       latency_ms: Math.round(performance.now() - startedAt),
     })
   }
+  const usage = payload?.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage)
+    ? usageSummary(payload.usage)
+    : undefined
   if (!response.ok) {
     const message = typeof payload?.error?.message === 'string' ? payload.error.message.slice(0, 500) : `HTTP ${response.status}`
-    throw new ServiceError(502, `OpenRouter rechazó la solicitud: ${message}`)
+    throw new ServiceError(502, `OpenRouter rechazó la solicitud: ${message}`, usage)
   }
   if (!payload) throw new ServiceError(502, 'OpenRouter no devolvió una respuesta válida')
 
   const choice = payload.choices?.[0]
   if (!choice?.message || choice.finish_reason === 'length') {
-    throw new ServiceError(502, 'OpenRouter no devolvió una respuesta completa')
+    throw new ServiceError(502, 'OpenRouter no devolvió una respuesta completa', usage)
   }
-  if (choice.message.refusal) throw new ServiceError(502, 'OpenRouter rechazó interpretar el documento')
+  if (choice.message.refusal) throw new ServiceError(502, 'OpenRouter rechazó interpretar el documento', usage)
   if (typeof choice.message.content !== 'string') {
-    throw new ServiceError(502, 'OpenRouter no devolvió JSON estructurado')
+    throw new ServiceError(502, 'OpenRouter no devolvió JSON estructurado', usage)
   }
 
   let result: unknown
   try {
     result = JSON.parse(choice.message.content)
   } catch {
-    throw new ServiceError(502, 'OpenRouter devolvió contenido que no es JSON válido')
+    throw new ServiceError(502, 'OpenRouter devolvió contenido que no es JSON válido', usage)
   }
 
   const { ajv, validate } = compiled
   if (!validate(result)) {
-    throw new ServiceError(502, `La respuesta de OpenRouter no cumple el schema: ${ajv.errorsText(validate.errors)}`)
+    throw new ServiceError(502, `La respuesta de OpenRouter no cumple el schema: ${ajv.errorsText(validate.errors)}`, usage)
   }
   return { result, usage: usageSummary(payload.usage) }
 }
@@ -263,7 +266,9 @@ export async function handleRequest(request: Request): Promise<Response> {
           error: detail,
         })
       }
-      return Response.json({ detail }, { status })
+      const errorPayload: { detail: string; usage?: OpenRouterUsage } = { detail }
+      if (error instanceof ServiceError && error.usage) errorPayload.usage = error.usage
+      return Response.json(errorPayload, { status })
     }
   }
 
